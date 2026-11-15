@@ -1,0 +1,24 @@
+name: fleetpy-nonstationary-pricing
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip=25.0
+  - numpy=2.2
+  - scipy=1.15
+  - pandas=2.2.3
+  - matplotlib
+  - psutil
+  - geopandas=1.0.1
+  - fiona=1.10.1
+  - pyogrio=0.10.0
+  - pyproj=3.7.0
+  - rtree=1.3.0
+  - shapely=2.0.6
+  - pyyaml=6.0.2
+  - tqdm=4.67.1
+  - cython=3.0.11
+  - pip:
+      - dill==0.3.9
+      - gurobipy==13.0.1
