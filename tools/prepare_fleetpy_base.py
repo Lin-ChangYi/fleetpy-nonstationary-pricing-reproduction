@@ -21,7 +21,8 @@ def prepare_fleetpy_base(fleetpy_root):
         raise FileExistsError(f"Choose a new FleetPy directory. Already exists: {fleetpy_root}")
     if not RESEARCH_PATCH.is_file():
         raise FileNotFoundError(f"Missing research patch: {RESEARCH_PATCH}")
-    research_patch = RESEARCH_PATCH.read_bytes()
+    # Git for Windows can check out the patch itself with CRLF line endings.
+    research_patch = RESEARCH_PATCH.read_bytes().replace(b"\r\n", b"\n")
 
     fleetpy_root.parent.mkdir(parents=True, exist_ok=True)
     temp_parent = str(fleetpy_root.parent)
