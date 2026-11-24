@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from tempfile import mkstemp
 
 import numpy as np
 import pandas as pd
@@ -32,9 +33,12 @@ def sha256(path):
 
 def write_csv(frame, path):
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    descriptor, name = mkstemp(prefix=".csv-", suffix=".tmp", dir=path.parent)
+    temporary = Path(name)
     try:
-        frame.to_csv(temporary, index=False)
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
+            # The manifest hashes were generated from CSVs with CRLF line endings.
+            frame.to_csv(handle, index=False, lineterminator="\r\n")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -190,6 +194,20 @@ def ensure_file(frame, path, expected_hash, verify_hashes):
     return "created"
 
 
+def prepare_taxi_zones(path):
+    mapping = pd.read_csv(path)
+    # The original study used the lowest-index network node in each taxi zone.
+    centroid_nodes = mapping.groupby("zone_id")["node_index"].transform("min")
+    is_centroid = mapping["node_index"].eq(centroid_nodes)
+    if "is_centroid" in mapping:
+        if not mapping["is_centroid"].eq(is_centroid).all():
+            raise ValueError(f"Unexpected taxi-zone centroid labels in {path}; use the public Manhattan mapping.")
+    else:
+        mapping["is_centroid"] = is_centroid
+        write_csv(mapping, path)
+    return mapping.set_index("node_index")["zone_id"]
+
+
 def prepare(fleetpy_root, samples, verify_hashes):
     fleetpy_root = fleetpy_root.resolve()
     demand_dir = fleetpy_root / "data" / "demand" / "Manhattan_2018" / "matched" / "Manhattan_2019_corrected"
@@ -209,7 +227,7 @@ def prepare(fleetpy_root, samples, verify_hashes):
     if len(records) != samples:
         raise ValueError(f"Only {len(records)} paired samples are available.")
     node_xy = pd.read_csv(nodes_path).set_index("node_index")[["pos_x", "pos_y"]]
-    taxi_zones = pd.read_csv(taxi_zone_path).set_index("node_index")["zone_id"]
+    taxi_zones = prepare_taxi_zones(taxi_zone_path)
     travel_times = np.load(matrix_path, mmap_mode="r")
     for record in records:
         sample_id = int(record["sample_id"])

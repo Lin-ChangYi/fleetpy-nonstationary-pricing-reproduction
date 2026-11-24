@@ -1,0 +1,419 @@
+diff --git a/data/vehicles/default_single_occupancy_vehtype.csv b/data/vehicles/default_single_occupancy_vehtype.csv
+new file mode 100644
+index 0000000..3ded2da
+--- /dev/null
++++ b/data/vehicles/default_single_occupancy_vehtype.csv
+@@ -0,0 +1,7 @@
++vtype_name_full,default_single_occupancy_vehtype
++maximum_passengers,1
++daily_fix_cost [cent],2500
++per_km_cost [cent],25
++battery_size [kWh],50
++range [km],10000
++source,
+diff --git a/src/FleetSimulationBase.py b/src/FleetSimulationBase.py
+index acf621c..bcd5a37 100644
+--- a/src/FleetSimulationBase.py
++++ b/src/FleetSimulationBase.py
+@@ -108,7 +108,14 @@ def build_operator_attribute_dicts(parameters, n_op, prefix="op_"):
+         elif len(parameters[k]) == n_op:
+             for i, op in enumerate(list_op_dicts):
+                 op[k] = parameters[k][i]
+-        elif k == G_OP_REPO_TH_DEF: # TODO # lists as inputs for op
++        elif k in [
++            G_OP_REPO_TH_DEF,
++            "op_mab_arms",
++            "op_mab_fixed_allocation_probs",
++            "op_mab_grid_schedule",
++            "op_random_arms",
++            "op_random_arm_probs",
++        ]: # TODO # lists as inputs for op
+             for di in list_op_dicts:
+                 di[k] = parameters[k]
+         # if parameter has invalid number of values, raise exception
+@@ -809,6 +816,15 @@ class FleetSimulationBase:
+             # record stats
+             self.record_stats()
+ 
++            # give optional pricing modules a final chance to flush episode-level logs
++            for op in self.operators:
++                dyn_pricing = getattr(op, "dyn_pricing", None)
++                if dyn_pricing is not None and hasattr(dyn_pricing, "final_log"):
++                    try:
++                        dyn_pricing.final_log()
++                    except Exception:
++                        LOG.exception("Failed to finalize dynamic pricing logs for operator %s", op.op_id)
++
+             # save final state, record remaining travelers and vehicle tasks
+             self.save_final_state()
+             self.record_remaining_assignments()
+diff --git a/src/demand/TravelerModels.py b/src/demand/TravelerModels.py
+index f55f913..e5d4587 100644
+--- a/src/demand/TravelerModels.py
++++ b/src/demand/TravelerModels.py
+@@ -31,6 +31,18 @@ def offer_str(rq_offer):
+     return ", ".join(["{}:{}".format(k, str(v)) for k, v in rq_offer.items()])
+ 
+ 
++def _stable_uniform_01(*values):
++    mask = (1 << 64) - 1
++    x = 0x9E3779B97F4A7C15
++    for value in values:
++        v = int(value) & mask
++        x = (x + v + 0x9E3779B97F4A7C15) & mask
++        x = ((x ^ (x >> 30)) * 0xBF58476D1CE4E5B9) & mask
++        x = ((x ^ (x >> 27)) * 0x94D049BB133111EB) & mask
++        x = (x ^ (x >> 31)) & mask
++    return float(((x >> 11) + 0.5) / float(1 << 53))
++
++
+ # -------------------------------------------------------------------------------------------------------------------- #
+ # Traveler Model Classes
+ # ----------------------
+diff --git a/src/fleetctrl/FleetControlBase.py b/src/fleetctrl/FleetControlBase.py
+index bcad954..9a00824 100644
+--- a/src/fleetctrl/FleetControlBase.py
++++ b/src/fleetctrl/FleetControlBase.py
+@@ -357,7 +357,18 @@ class FleetControlBase(metaclass=ABCMeta):
+         :param simulation_time: current simulation time
+         :type simulation_time: float
+         """
+-        self.rq_dict[rid].set_service_accepted()
++        prq = self.rq_dict[rid]
++        prq.set_service_accepted()
++        if (
++            hasattr(self, "dyn_pricing")
++            and hasattr(self.dyn_pricing, "record_request_acceptance")
++            and getattr(prq, "fare", None) is not None
++        ):
++            self.dyn_pricing.record_request_acceptance(
++                rid=rid,
++                amount=prq.fare,
++                sim_time=simulation_time,
++            )
+ 
+     @abstractmethod
+     def user_cancels_request(self, rid : Any, simulation_time : int):
+@@ -368,7 +379,15 @@ class FleetControlBase(metaclass=ABCMeta):
+         :param simulation_time: current simulation time
+         :type simulation_time: float
+         """
+-        pass
++        if (
++            hasattr(self, "dyn_pricing")
++            and hasattr(self.dyn_pricing, "record_request_failure")
++        ):
++            self.dyn_pricing.record_request_failure(
++                rid=rid,
++                sim_time=simulation_time,
++                reason="user_cancel_or_reject",
++            )
+ 
+     @abstractmethod
+     def _create_user_offer(self, prq : PlanRequest, simulation_time : int, assigned_vehicle_plan : VehiclePlan=None,
+@@ -403,6 +422,17 @@ class FleetControlBase(metaclass=ABCMeta):
+         :param simulation_time: current simulation time
+         :return: Rejection (child class of TravellerOffer)
+         """
++        if (
++            hasattr(self, "dyn_pricing")
++            and hasattr(self.dyn_pricing, "record_unserved_request")
++        ):
++            self.dyn_pricing.record_unserved_request(
++                sim_time=simulation_time,
++                rid=prq.get_rid_struct(),
++                o_pos=prq.o_pos,
++                d_pos=prq.d_pos,
++                reason="operator_rejection",
++            )
+         offer = Rejection(prq.get_rid(), self.op_id)
+         LOG.debug(f"reject customer {prq} at time {simulation_time}")
+         prq.set_service_offered(offer)
+@@ -462,6 +492,20 @@ class FleetControlBase(metaclass=ABCMeta):
+         :type simulation_time: float
+         """
+         self.rq_dict[rid].set_pickup(vid, simulation_time)
++        # Record accepted/served pricing reward only for pricing modules that opt in.
++        if (
++            hasattr(self, 'dyn_pricing')
++            and hasattr(self.dyn_pricing, 'record_fare')
++            and getattr(self.dyn_pricing, 'record_fare_at_boarding', lambda: False)()
++        ):
++            prq = self.rq_dict[rid]
++            if hasattr(prq, 'fare') and prq.fare is not None:
++                self.dyn_pricing.record_fare(
++                    prq.fare,
++                    o_pos=prq.o_pos,
++                    rid=rid,
++                    sim_time=simulation_time,
++                )
+ 
+     @abstractmethod
+     def acknowledge_alighting(self, rid : Any, vid : int, simulation_time : int):
+@@ -625,12 +669,25 @@ class FleetControlBase(metaclass=ABCMeta):
+                 exp_pt = None
+             base_fare_factor, dist_fare_factor, gen_factor =\
+                 self.dyn_pricing.get_elastic_price_factors(sim_time, expected_pu_time=exp_pt, o_pos=prq.o_pos,
+-                                                           d_pos=prq.d_pos)
++                                                           d_pos=prq.d_pos, rid=prq.get_rid_struct())
+         else:
+             base_fare_factor, dist_fare_factor, gen_factor = 1, 1, 1
+         fare = (self.base_fare * base_fare_factor + prq.init_direct_td * self.dist_fare * dist_fare_factor
+                 + prq.init_direct_tt * self.time_fare) * gen_factor * pax_factor
+         final_fare = int(max(fare, self.min_fare))
++
++        prq.fare = final_fare
++        if (
++            hasattr(self, "dyn_pricing")
++            and hasattr(self.dyn_pricing, "record_fare")
++            and getattr(self.dyn_pricing, "record_fare_at_offer", lambda: True)()
++        ):
++            self.dyn_pricing.record_fare(
++                final_fare,
++                o_pos=prq.o_pos,
++                rid=prq.get_rid_struct(),
++                sim_time=sim_time,
++            )
+         return final_fare
+ 
+     def compute_current_fleet_utilization(self, sim_time : int) -> Tuple[float, float, int]:
+diff --git a/src/fleetctrl/RidePoolingBatchOptimizationFleetControlBase.py b/src/fleetctrl/RidePoolingBatchOptimizationFleetControlBase.py
+index 22bdd3b..a88c733 100644
+--- a/src/fleetctrl/RidePoolingBatchOptimizationFleetControlBase.py
++++ b/src/fleetctrl/RidePoolingBatchOptimizationFleetControlBase.py
+@@ -266,6 +266,15 @@ class RidePoolingBatchOptimizationFleetControlBase(FleetControlBase):
+         """
+         self.sim_time = simulation_time
+         LOG.debug(f"user cancels request {rid} at {simulation_time}")
++        if (
++            hasattr(self, "dyn_pricing")
++            and hasattr(self.dyn_pricing, "record_request_failure")
++        ):
++            self.dyn_pricing.record_request_failure(
++                rid=rid,
++                sim_time=simulation_time,
++                reason="user_cancel_or_reject",
++            )
+         prev_vid = self.rid_to_assigned_vid.get(rid)
+         prq = self.rq_dict.get(rid)
+         if prev_vid is not None and prq is not None and prq.get_reservation_flag():
+@@ -300,7 +309,7 @@ class RidePoolingBatchOptimizationFleetControlBase(FleetControlBase):
+         """
+         self.sim_time = simulation_time
+         LOG.debug(f"acknowledge boarding {rid} in {vid} at {simulation_time}")
+-        self.rq_dict[rid].set_pickup(vid, simulation_time)
++        super().acknowledge_boarding(rid, vid, simulation_time)
+         self.RPBO_Module.set_database_in_case_of_boarding(rid, vid)
+ 
+     def acknowledge_alighting(self, rid : Any, vid : int, simulation_time : int):
+@@ -525,4 +534,4 @@ class RidePoolingBatchOptimizationFleetControlBase(FleetControlBase):
+             prq.set_service_offered(offer)  # has to be called
+         else:
+             offer = self._create_rejection(prq, simulation_time)
+-        return offer
+\ No newline at end of file
++        return offer
+diff --git a/src/fleetctrl/pricing/DynamicPricingBase.py b/src/fleetctrl/pricing/DynamicPricingBase.py
+index dfcfd3c..808c257 100644
+--- a/src/fleetctrl/pricing/DynamicPricingBase.py
++++ b/src/fleetctrl/pricing/DynamicPricingBase.py
+@@ -38,7 +38,7 @@ class DynamicPricingBase(ABC):
+         self.record_df.set_index(self.record_df_index_cols, inplace=True)
+ 
+     @abstractmethod
+-    def get_elastic_price_factors(self, sim_time, expected_pu_time=None, o_pos=None, d_pos=None):
++    def get_elastic_price_factors(self, sim_time, expected_pu_time=None, o_pos=None, d_pos=None, rid=None):
+         """This method returns current time dependent fare scales. If it is called with sim_time, the price factors
+         are updated first.
+ 
+@@ -50,6 +50,7 @@ class DynamicPricingBase(ABC):
+         :type o_pos: tuple
+         :param d_pos: destination of request
+         :type d_pos: tuple
++        :param rid: request id; optional for pricing strategies that need stable per-request assignment
+         :return: tuple of base_fare_factor, distance_fare_factor, general_factor
+         :rtype: (float, float, float)
+         """
+@@ -67,3 +68,11 @@ class DynamicPricingBase(ABC):
+         :return: None
+         """
+         pass
++
++    def record_fare_at_offer(self) -> bool:
++        """Whether FleetControlBase should report fares when an offer price is computed."""
++        return True
++
++    def record_fare_at_boarding(self) -> bool:
++        """Whether FleetControlBase should report fares when the passenger boards."""
++        return False
+diff --git a/src/fleetctrl/pricing/TimeBasedDP.py b/src/fleetctrl/pricing/TimeBasedDP.py
+index e14d0ca..b4733a2 100644
+--- a/src/fleetctrl/pricing/TimeBasedDP.py
++++ b/src/fleetctrl/pricing/TimeBasedDP.py
+@@ -23,7 +23,7 @@ class TimeBasedDP(DynamicPricingBase):
+         # define current parameters as attributes
+         raise NotImplementedError("TimeBaseDP is not implemented currently!")
+ 
+-    def get_elastic_price_factors(self, sim_time, expected_pu_time=None, o_pos=None, d_pos=None):
++    def get_elastic_price_factors(self, sim_time, expected_pu_time=None, o_pos=None, d_pos=None, rid=None):
+         """This method returns current time dependent fare scales. If it is called with sim_time, the price factors
+         are updated first.
+ 
+diff --git a/src/fleetctrl/pricing/UtilizationBasedDP.py b/src/fleetctrl/pricing/UtilizationBasedDP.py
+index 6d0a732..3c393d7 100644
+--- a/src/fleetctrl/pricing/UtilizationBasedDP.py
++++ b/src/fleetctrl/pricing/UtilizationBasedDP.py
+@@ -53,7 +53,7 @@ class UtilizationBasedDP(DynamicPricingBase):
+         self.record_df.set_index(self.record_df_index_cols, inplace=True)
+         # TODO # check differences to other util-pricing scheme
+ 
+-    def get_elastic_price_factors(self, sim_time, expected_pu_time=None, o_pos=None, d_pos=None):
++    def get_elastic_price_factors(self, sim_time, expected_pu_time=None, o_pos=None, d_pos=None, rid=None):
+         """This method returns current time dependent fare scales. If it is called with sim_time, the price factors
+         are updated first.
+ 
+diff --git a/src/misc/config.py b/src/misc/config.py
+index 0e34726..f3784d4 100644
+--- a/src/misc/config.py
++++ b/src/misc/config.py
+@@ -135,7 +135,7 @@ class ConstantConfig(dict):
+         :param file_path: path to the csv configuration file
+         :type file_path: str
+         """
+-        with open(file_path) as f:
++        with open(file_path, encoding='utf-8') as f:
+             cfg = yaml.load(f, Loader=yaml.Loader)
+         return cls(cfg)
+ 
+@@ -186,7 +186,7 @@ class ScenarioConfig(list):
+         :param file_path: path to the csv configuration file
+         :type file_path: str
+         """
+-        with open(file_path) as f:
++        with open(file_path, encoding='utf-8') as f:
+             cfg = yaml.load(f, Loader=yaml.Loader)
+         return cls(cfg)
+ 
+diff --git a/src/routing/NetworkTTMatrix.py b/src/routing/NetworkTTMatrix.py
+index 2996fef..2aa761c 100644
+--- a/src/routing/NetworkTTMatrix.py
++++ b/src/routing/NetworkTTMatrix.py
+@@ -134,11 +134,18 @@ class NetworkTTMatrix(NetworkBase):
+                 d_node_obj.add_prev_edge_from(o_node_obj)
+         # load TT and TD matrices
+         print(f"\t ... loading network travel time/distance tables ...")
++        self._matrix_mode = os.environ.get("FLEETPY_NETWORK_MATRIX_MODE", "array").lower()
++        if self._matrix_mode not in {"array", "mmap"}:
++            raise ValueError(
++                "FLEETPY_NETWORK_MATRIX_MODE must be either 'array' or 'mmap', "
++                f"not {self._matrix_mode!r}."
++            )
++        self._matrix_mmap_mode = "r" if self._matrix_mode == "mmap" else None
+         tt_table_f = os.path.join(self.network_name_dir, "ff", "tables", "nn_fastest_tt.npy")
+-        self.tt_numpy = np.load(tt_table_f)
+-        self.tt = self.tt_numpy.tolist()
++        self.tt_numpy = np.load(tt_table_f, mmap_mode=self._matrix_mmap_mode)
++        self.tt = self.tt_numpy
+         distance_table_f = os.path.join(self.network_name_dir, "ff", "tables", "nn_fastest_distance.npy")
+-        self.td = np.load(distance_table_f).tolist()
++        self.td = np.load(distance_table_f, mmap_mode=self._matrix_mmap_mode)
+         # load travel times
+         self.current_tt_factor_index = 0
+         self.sorted_tt_factor_times = []
+@@ -221,8 +228,11 @@ class NetworkTTMatrix(NetworkBase):
+                     elif self._precalculated_tt_paths:
+                         path = self._precalculated_tt_paths[next_time]
+                         if self._current_tt_path != path:
+-                            self.tt_numpy = np.load(path.joinpath("tt_matrix.npy"))
+-                            self.tt = self.tt_numpy.tolist()
++                            self.tt_numpy = np.load(
++                                path.joinpath("tt_matrix.npy"),
++                                mmap_mode=self._matrix_mmap_mode,
++                            )
++                            self.tt = self.tt_numpy
+                             self._current_tt_path = path
+                             tt_updated = True
+                     if tt_updated is True:
+@@ -291,10 +301,10 @@ class NetworkTTMatrix(NetworkBase):
+         :return: (travel time, distance); if no section between nodes (None, None)
+         :rtype: list
+         """
+-        tt = self.tt[start_node_index][end_node_index]
++        tt = float(self.tt[start_node_index, end_node_index])
+         scaled_tt = tt * self.tt_factor
+         if tt not in [None, np.nan, np.inf]:
+-            return scaled_tt, self.td[start_node_index][end_node_index]
++            return scaled_tt, float(self.td[start_node_index, end_node_index])
+         else:
+             return None, None
+ 
+@@ -362,9 +372,9 @@ class NetworkTTMatrix(NetworkBase):
+             if c_pos[2] is None:
+                 c_pos = (c_pos[0], route[i], 0)
+             rel_factor = (1 - c_pos[2])
+-            # c_edge_tt = rel_factor * self.tt_factor * self.tt[c_pos[0]][c_pos[1]]
++            # Edge time uses the full edge value; rel_factor is applied to the arrival timestamp below.
+             # next_node_time = last_time + c_edge_tt
+-            c_edge_tt = self.tt_factor * self.tt[c_pos[0]][c_pos[1]]
++            c_edge_tt = self.tt_factor * float(self.tt[c_pos[0], c_pos[1]])
+             next_node_time = last_time + rel_factor * c_edge_tt
+             end_time = np.round(end_time, 2)
+             next_node_time = np.round(next_node_time, 2)  # TODO # raw value leads to 1.00000002 being recognized as > 1
+@@ -372,13 +382,13 @@ class NetworkTTMatrix(NetworkBase):
+             if next_node_time > end_time:
+                 # move vehicle to final position of current edge
+                 end_rel_factor = c_pos[2] + (end_time - last_time) / c_edge_tt
+-                driven_distance += (end_rel_factor - c_pos[2]) * self.td[c_pos[0]][c_pos[1]]
++                driven_distance += (end_rel_factor - c_pos[2]) * float(self.td[c_pos[0], c_pos[1]])
+                 c_pos = (c_pos[0], c_pos[1], end_rel_factor)
+                 arrival_in_time_step = -1
+                 break
+             else:
+                 # move vehicle to next node/edge and record data
+-                driven_distance += rel_factor * self.td[c_pos[0]][c_pos[1]]
++                driven_distance += rel_factor * float(self.td[c_pos[0], c_pos[1]])
+                 next_node = route[i]
+                 list_passed_nodes.append(next_node)
+                 if record_node_times:
+@@ -405,8 +415,8 @@ class NetworkTTMatrix(NetworkBase):
+         origin_node, destination_node, add_tt, add_dist = self._get_od_nodes_and_section_overheads(origin_position,
+                                                                                                    destination_position)
+         # matrix lookup
+-        tt = self.tt[origin_node.node_index][destination_node.node_index]
+-        dist = self.td[origin_node.node_index][destination_node.node_index]
++        tt = float(self.tt[origin_node.node_index, destination_node.node_index])
++        dist = float(self.td[origin_node.node_index, destination_node.node_index])
+         # scaling
+         scaled_tt = (add_tt + tt) * self.tt_factor
+         return scaled_tt, scaled_tt, dist + add_dist
+@@ -650,8 +660,8 @@ class NetworkTTMatrix(NetworkBase):
+             return (0.0, 0.0)
+         o_node_index = position[0]
+         d_node_index = position[1]
+-        all_travel_time = self.tt[o_node_index][d_node_index]
+-        all_travel_distance = self.td[o_node_index][d_node_index]
++        all_travel_time = float(self.tt[o_node_index, d_node_index])
++        all_travel_distance = float(self.td[o_node_index, d_node_index])
+         overhead_fraction = position[2]
+         if not traveled_from_start:
+             overhead_fraction = 1.0 - overhead_fraction
+@@ -700,7 +710,7 @@ class NetworkTTMatrix(NetworkBase):
+         node_list = [current_node.node_index]
+         route_tt = 0.0
+         scaled_route_tt = 0.0
+-        total_tt = self.tt[origin_node.node_index][destination_node.node_index]
++        total_tt = float(self.tt[origin_node.node_index, destination_node.node_index])
+         if total_tt in [None, np.nan, np.inf]:
+             prt_str = f"There is no route from {origin_node} to {destination_node}"
+             raise AssertionError(prt_str)
+@@ -711,8 +721,8 @@ class NetworkTTMatrix(NetworkBase):
+                 # A->B + B->C = A->C
+                 if next_node_obj.is_stop_only and next_node_obj != destination_node:
+                     continue
+-                next_tt = self.tt[current_node.node_index][next_node_id]
+-                from_next_tt = self.tt[next_node_id][destination_node.node_index]
++                next_tt = float(self.tt[current_node.node_index, next_node_id])
++                from_next_tt = float(self.tt[next_node_id, destination_node.node_index])
+                 if route_tt + next_tt + from_next_tt - total_tt < EPS:
+                     found_next_node = True
+                     node_list.append(next_node_id)

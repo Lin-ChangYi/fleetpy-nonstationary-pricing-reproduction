@@ -4,7 +4,7 @@
 
 The public FleetPy Manhattan package is the direct simulation-data source. Its historical request data are derived from the public NYC Taxi and Limousine Commission (TLC) trip-record data for 2018-11-11 through 2018-11-18. FleetPy filters the records to trips with both endpoints in Manhattan and matches the endpoints to the Manhattan road network. This experiment uses the full day `2018-11-12.csv` from that package, containing 213,996 matched requests before study-specific sampling.
 
-The source package also supplies the OpenStreetMap-based Manhattan network, preprocessed free-flow travel-time and distance matrices, an hourly mean traffic factor for 2018-11-12, the Manhattan Taxi-Zone node mapping, and vehicle definitions. No confidential trip-level data are used or redistributed.
+The source package also supplies the OpenStreetMap-based Manhattan network, preprocessed free-flow travel-time and distance matrices, an hourly mean traffic factor for 2018-11-12, and the Manhattan Taxi-Zone node mapping. The runtime patch supplies the experiment's single-occupancy vehicle definition.
 
 ## Request preparation
 
@@ -14,6 +14,7 @@ The source package also supplies the OpenStreetMap-based Manhattan network, prep
 2. It reconstructs 50 frozen daily traces of exactly 10,000 unique requests. The 48 half-hour request quotas for every paired sample are recorded in `config/paired_samples_50.csv`; therefore the historical intraday request-arrival profile is preserved in each trace.
 3. Within every half-hour period, 70% of the selected origins are drawn from the union of six fixed grid-boundary corridors: vertical coordinates 585,000, 586,500, and 588,000 m and horizontal coordinates 4,510,500, 4,512,000, and 4,513,500 m in the network coordinate system. Each corridor has half-width 375 m, using the L-infinity distance convention. The remaining requests are selected from the non-corridor population; no request is duplicated.
 4. It builds a 900-second Taxi-Zone perfect-trip forecast by aggregating selected origin and destination trips after adding the FleetPy travel time from the precomputed matrix.
+5. It designates the smallest node index in each taxi zone as the centroid used for repositioning, matching the study's 63 centroids.
 
 The manifest records SHA-256 hashes for each generated demand and forecast file. Passing `--verify-hashes` checks the reconstructed files against the inputs used for the completed 50-pair evaluation.
 

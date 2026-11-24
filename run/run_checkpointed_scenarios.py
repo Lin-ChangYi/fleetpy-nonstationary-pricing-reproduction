@@ -405,7 +405,7 @@ def _run_batch(args: argparse.Namespace) -> int:
         f"realtime plot=0, network matrices={args.network_matrix_mode}."
     )
     if not args.execute:
-        print("Preparation only. No simulation was started; pass --execute after the audit gate is approved.")
+        print("Preparation only. Pass --execute to run the simulations.")
         return 0
     if not pending:
         print("All selected scenarios are complete.")
