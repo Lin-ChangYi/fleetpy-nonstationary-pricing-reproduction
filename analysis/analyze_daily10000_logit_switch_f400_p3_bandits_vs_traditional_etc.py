@@ -17,12 +17,8 @@ from scipy.stats import t as student_t
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_BANDIT_CHECKPOINT = (
-    ROOT / "experiments" / "checkpoints" / "LOGIT_SWITCH_D10000_F400_R1500_P3_BANDITS_50x6.csv"
-)
-DEFAULT_ETC_CHECKPOINT = (
-    ROOT / "experiments" / "checkpoints" / "LOGIT_SWITCH_D10000_F400_R1500_P3_ETC_ABN_50x4.csv"
-)
+BANDIT_CHECKPOINT_NAME = "NONSTATIONARY_P3_R2_BANDITS_50x6.csv"
+ETC_CHECKPOINT_NAME = "NONSTATIONARY_P3_R2_ETC_50x4.csv"
 DEFAULT_OUTPUT_DIR = (
     ROOT / "analysis" / "outputs" / "daily10000_logit_switch_f400_p3_bandits_vs_traditional_etc_50_current"
 )
@@ -435,10 +431,18 @@ def render_phase_means(summary: pd.DataFrame, output: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--bandit-checkpoint", type=Path, default=DEFAULT_BANDIT_CHECKPOINT)
-    parser.add_argument("--traditional-checkpoint", type=Path, default=DEFAULT_ETC_CHECKPOINT)
+    parser.add_argument("--fleetpy-root", type=Path, help="FleetPy checkout used to locate any unspecified checkpoint.")
+    parser.add_argument("--bandit-checkpoint", type=Path, help="Bandit checkpoint CSV path, overriding --fleetpy-root.")
+    parser.add_argument("--traditional-checkpoint", type=Path, help="ETC checkpoint CSV path, overriding --fleetpy-root.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args()
+
+    if args.fleetpy_root is not None:
+        checkpoint_dir = args.fleetpy_root / "experiments" / "checkpoints"
+        args.bandit_checkpoint = args.bandit_checkpoint or checkpoint_dir / BANDIT_CHECKPOINT_NAME
+        args.traditional_checkpoint = args.traditional_checkpoint or checkpoint_dir / ETC_CHECKPOINT_NAME
+    if args.bandit_checkpoint is None or args.traditional_checkpoint is None:
+        parser.error("provide --fleetpy-root or both --bandit-checkpoint and --traditional-checkpoint")
 
     runs = merge_runs(args.bandit_checkpoint, args.traditional_checkpoint)
     totals = build_total_metrics(runs)

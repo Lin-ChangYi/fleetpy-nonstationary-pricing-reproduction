@@ -18,6 +18,19 @@ The source package also supplies the OpenStreetMap-based Manhattan network, prep
 
 The manifest records SHA-256 hashes for each generated demand and forecast file. Passing `--verify-hashes` checks the reconstructed files against the inputs used for the completed 50-pair evaluation.
 
+## Taxi-zone mapping verification
+
+The Taxi Zone mapping is `data/zones/Manhattan_Taxi_Zones/Manhattan_2019_corrected/node_zone_info.csv` in the FleetPy checkout. It has 4,411 node assignments across 63 zones. The preparation script adds `is_centroid` for the smallest `node_index` in each zone.
+
+| File | SHA-256 |
+| --- | --- |
+| Original `node_zone_info.csv` from the [FleetPy Manhattan 1.0 Zenodo archive](https://zenodo.org/records/15187906) | `e887c89d4f230dc4e770532a85e9360f01900ad0df92c5c8544155cb2c83859b` |
+| Prepared `node_zone_info.csv` with the 63 centroid flags | `ac8f641d0fbe41ba11bfd59ee9000394d30a035c2791b83bb37bedb5ac4bd7ac` |
+
+The prepared SHA-256 was measured from the archived mapping in the input directory recorded by the original Bandits and ETC runs. These hashes cover the individual CSV files. Zenodo publishes MD5 `8b11882ae9c6d87f666bf6e006806744` for the complete ZIP archive.
+
+With `--verify-hashes`, the script verifies the original CSV before adding centroids and verifies the staged output before replacing the CSV. On subsequent runs, it checks the existing centroid flags and compares the file with the prepared SHA-256.
+
 ## Nonstationary passenger-response environment
 
 The request-arrival trace is fixed before simulation. Nonstationarity in price response is introduced by the five pre-specified binary-logit phases in `config/nonstationary_p3_r2.yaml`:

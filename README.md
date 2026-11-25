@@ -52,7 +52,7 @@ data/networks/Manhattan_2019_corrected/2018-11-12_mean_tt_factor_hourly.csv
 data/zones/Manhattan_Taxi_Zones/Manhattan_2019_corrected/node_zone_info.csv
 ```
 
-4. Run either batch. The script installs the overlay, prepares the taxi-zone centroids, regenerates the paired inputs, verifies their SHA-256 hashes, and writes the scenario CSV. Add `-Execute` to start the simulation.
+4. Run either batch. The script installs the overlay, verifies the taxi-zone mapping, prepares its centroids, verifies the paired demand and forecast inputs, and writes the scenario CSV. Add `-Execute` to start the simulation.
 
 ```powershell
 .\run\run_experiment.ps1 -Batch bandits -FleetPyRoot $root -Samples 1
@@ -64,10 +64,24 @@ data/zones/Manhattan_Taxi_Zones/Manhattan_2019_corrected/node_zone_info.csv
 
 ## Outputs
 
-The runner writes restartable checkpoints under `experiments/checkpoints/` and FleetPy results under `studies/nonstationary_pricing_reproduction/results/` in the target FleetPy checkout. Analyze completed batches with explicit paths:
+The runner writes restartable checkpoints under `experiments/checkpoints/` and FleetPy results under `studies/nonstationary_pricing_reproduction/results/` in the target FleetPy checkout. A completed scenario must include a pricing request log with the columns used by the analysis and at least one data row.
+
+Pass the FleetPy checkout to locate the checkpoints automatically.
 
 ```powershell
 $root = "C:\path\to\FleetPy-experiment"
+python .\analysis\analyze_daily10000_logit_switch_f400_p3_bandits.py `
+  --fleetpy-root $root `
+  --output-dir "$root\analysis\outputs\nonstationary_bandits"
+
+python .\analysis\analyze_daily10000_logit_switch_f400_p3_bandits_vs_traditional_etc.py `
+  --fleetpy-root $root `
+  --output-dir "$root\analysis\outputs\nonstationary_bandits_vs_etc"
+```
+
+You can also pass full checkpoint paths. An explicit path takes precedence over the path derived from `--fleetpy-root` for that checkpoint.
+
+```powershell
 python .\analysis\analyze_daily10000_logit_switch_f400_p3_bandits.py `
   --checkpoint "$root\experiments\checkpoints\NONSTATIONARY_P3_R2_BANDITS_50x6.csv" `
   --output-dir "$root\analysis\outputs\nonstationary_bandits"

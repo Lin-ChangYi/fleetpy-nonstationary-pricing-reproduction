@@ -18,12 +18,7 @@ from scipy.stats import t as student_t
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_CHECKPOINT = (
-    ROOT
-    / "experiments"
-    / "checkpoints"
-    / "LOGIT_SWITCH_D10000_F400_R1500_P3_BANDITS_50x6.csv"
-)
+BANDIT_CHECKPOINT = Path("experiments", "checkpoints", "NONSTATIONARY_P3_R2_BANDITS_50x6.csv")
 DEFAULT_OUTPUT_DIR = (
     ROOT
     / "analysis"
@@ -375,9 +370,15 @@ def render_phase_means(summary: pd.DataFrame, output: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--checkpoint", type=Path, default=DEFAULT_CHECKPOINT)
+    parser.add_argument("--fleetpy-root", type=Path, help="FleetPy checkout containing the bandit checkpoint.")
+    parser.add_argument("--checkpoint", type=Path, help="Bandit checkpoint CSV path, overriding --fleetpy-root.")
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     args = parser.parse_args()
+
+    if args.checkpoint is None:
+        if args.fleetpy_root is None:
+            parser.error("provide --checkpoint or --fleetpy-root")
+        args.checkpoint = args.fleetpy_root / BANDIT_CHECKPOINT
 
     runs = completed_runs(args.checkpoint)
     total_metrics = build_total_metrics(runs)

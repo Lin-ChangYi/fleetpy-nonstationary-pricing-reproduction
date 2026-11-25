@@ -12,6 +12,7 @@ later sample, without leaving workers idle while earlier jobs finish.
 from __future__ import annotations
 
 import argparse
+import csv
 import os
 import shutil
 import subprocess
@@ -33,12 +34,20 @@ LOG_DIR = EXPERIMENTS_DIR / "logs"
 CHECKPOINT_DIR = EXPERIMENTS_DIR / "checkpoints"
 FAILED_RUN_ARCHIVE = REPO_ROOT / "archive" / "incomplete_runs"
 
+REQUEST_LOG_FILENAME = "mab_spatial_request_log.csv"
+REQUEST_LOG_COLUMNS = {
+    "request_id",
+    "pricing_episode_start",
+    "request_reward_amount",
+    "request_reward_observed",
+}
 REQUIRED_OUTPUTS = (
     "00_config.json",
     "final_state.csv",
     "1_user-stats.csv",
     "2-0_op-stats.csv",
     "standard_eval.csv",
+    REQUEST_LOG_FILENAME,
 )
 
 SINGLE_THREAD_ENV = {
@@ -114,11 +123,30 @@ def _study_name(constant_config: Path) -> str:
     return constant_config.parent.parent.name
 
 
+def _has_request_log_data(path: Path) -> bool:
+    try:
+        with path.open(newline="", encoding="utf-8-sig") as handle:
+            rows = csv.reader(handle, strict=True)
+            header = next(rows, [])
+            if len(set(header)) != len(header) or not REQUEST_LOG_COLUMNS.issubset(header):
+                return False
+
+            # Read only the first nonblank record to keep resume checks fast.
+            row = next((row for row in rows if any(field.strip() for field in row)), [])
+            return len(row) == len(header) and bool(row[header.index("request_id")].strip())
+    except (OSError, UnicodeError, csv.Error):
+        return False
+
+
 def _missing_outputs(result_dir: Path) -> list[str]:
     missing = []
     for filename in REQUIRED_OUTPUTS:
         path = result_dir / filename
-        if not path.is_file() or path.stat().st_size == 0:
+        if (
+            not path.is_file()
+            or path.stat().st_size == 0
+            or (filename == REQUEST_LOG_FILENAME and not _has_request_log_data(path))
+        ):
             missing.append(filename)
     return missing
 

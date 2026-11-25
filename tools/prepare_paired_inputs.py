@@ -3,6 +3,7 @@ import csv
 import hashlib
 import json
 import os
+from io import BytesIO
 from pathlib import Path
 from tempfile import mkstemp
 
@@ -21,6 +22,8 @@ RADIUS_M = GRID_EDGE_M / 4.0
 VERTICAL_BOUNDARIES_M = (585_000.0, 586_500.0, 588_000.0)
 HORIZONTAL_BOUNDARIES_M = (4_510_500.0, 4_512_000.0, 4_513_500.0)
 FULL_WITH_FARE_SHA256 = "066f45403fe2d86c37db3c89531f4df9d248584eb2f6af2c417f6061958b9d18"
+TAXI_ZONE_SOURCE_SHA256 = "e887c89d4f230dc4e770532a85e9360f01900ad0df92c5c8544155cb2c83859b"
+TAXI_ZONE_PREPARED_SHA256 = "ac8f641d0fbe41ba11bfd59ee9000394d30a035c2791b83bb37bedb5ac4bd7ac"
 
 
 def sha256(path):
@@ -31,7 +34,7 @@ def sha256(path):
     return digest.hexdigest()
 
 
-def write_csv(frame, path):
+def write_csv(frame, path, expected_hash=None):
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, name = mkstemp(prefix=".csv-", suffix=".tmp", dir=path.parent)
     temporary = Path(name)
@@ -39,6 +42,10 @@ def write_csv(frame, path):
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="") as handle:
             # The manifest hashes were generated from CSVs with CRLF line endings.
             frame.to_csv(handle, index=False, lineterminator="\r\n")
+        if expected_hash is not None:
+            actual_hash = sha256(temporary)
+            if actual_hash != expected_hash:
+                raise ValueError(f"Hash mismatch for generated {path.name}: {actual_hash} != {expected_hash}")
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
@@ -194,8 +201,17 @@ def ensure_file(frame, path, expected_hash, verify_hashes):
     return "created"
 
 
-def prepare_taxi_zones(path):
-    mapping = pd.read_csv(path)
+def prepare_taxi_zones(path, verify_hashes):
+    contents = path.read_bytes()
+    if verify_hashes:
+        actual_hash = hashlib.sha256(contents).hexdigest()
+        if actual_hash not in (TAXI_ZONE_SOURCE_SHA256, TAXI_ZONE_PREPARED_SHA256):
+            raise ValueError(
+                f"Hash mismatch for taxi-zone mapping {path}: {actual_hash}. "
+                f"Expected the original Zenodo CSV ({TAXI_ZONE_SOURCE_SHA256}) "
+                f"or the prepared CSV ({TAXI_ZONE_PREPARED_SHA256})."
+            )
+    mapping = pd.read_csv(BytesIO(contents))
     # The original study used the lowest-index network node in each taxi zone.
     centroid_nodes = mapping.groupby("zone_id")["node_index"].transform("min")
     is_centroid = mapping["node_index"].eq(centroid_nodes)
@@ -204,7 +220,8 @@ def prepare_taxi_zones(path):
             raise ValueError(f"Unexpected taxi-zone centroid labels in {path}; use the public Manhattan mapping.")
     else:
         mapping["is_centroid"] = is_centroid
-        write_csv(mapping, path)
+        expected_hash = TAXI_ZONE_PREPARED_SHA256 if verify_hashes else None
+        write_csv(mapping, path, expected_hash)
     return mapping.set_index("node_index")["zone_id"]
 
 
@@ -219,6 +236,7 @@ def prepare(fleetpy_root, samples, verify_hashes):
     if not raw_path.is_file():
         raise FileNotFoundError(raw_path)
     raw = pd.read_csv(raw_path)
+    taxi_zones = prepare_taxi_zones(taxi_zone_path, verify_hashes)
     source = add_max_fare(raw)
     full_path = demand_dir / f"{DAY}_with_fare.csv"
     ensure_file(source, full_path, FULL_WITH_FARE_SHA256, verify_hashes)
@@ -227,7 +245,6 @@ def prepare(fleetpy_root, samples, verify_hashes):
     if len(records) != samples:
         raise ValueError(f"Only {len(records)} paired samples are available.")
     node_xy = pd.read_csv(nodes_path).set_index("node_index")[["pos_x", "pos_y"]]
-    taxi_zones = prepare_taxi_zones(taxi_zone_path)
     travel_times = np.load(matrix_path, mmap_mode="r")
     for record in records:
         sample_id = int(record["sample_id"])
